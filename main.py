@@ -1,129 +1,107 @@
-
 import streamlit as st
 from openai import OpenAI
 import json
 import pandas as pd
 import plotly.express as px
 
-# ================= 完美部署配置 =================
-# 这里不再直接写字符串，而是通过 st.secrets 读取
-# 这保证了你的 API Key 在 GitHub 上也是加密隐藏的
-try:
-    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-except:
-    st.error("请在 Streamlit 管理后台配置您的 DEEPSEEK_API_KEY")
+# ================= 1. 安全配置 (兼容云端与本地) =================
+# 优先读取 Secrets，如果读不到则提示
+if "DEEPSEEK_API_KEY" not in st.secrets:
+    st.error("❌ 未找到 API Key。请在本地 .streamlit/secrets.toml 或 Streamlit Cloud 后台配置。")
     st.stop()
 
-client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com" # 如果用的是 SiliconFlow，请改回对应的 URL
-)
+# 统一读取 Key
+MY_KEY = str(st.secrets["DEEPSEEK_API_KEY"]).strip()
 
-# ... (后续代码保持不变) ...
-# 注意：确保 model="deepseek-chat" 与你的服务商匹配
-# ================= 核心 Prompt (灵魂) =================
-SYSTEM_PROMPT = """
-你是一位资深的高中英语阅卷老师。请分析学生的作文。
+# 初始化客户端
+try:
+    client = OpenAI(
+        api_key=MY_KEY,
+        base_url="https://api.deepseek.com"
+    )
+except Exception as e:
+    st.error(f"❌ 客户端初始化失败: {e}")
+    st.stop()
 
-要求：
-1. 分析维度：语法(Grammar)、词汇(Vocabulary)、逻辑(Logic)、结构(Structure)。
-2. 评分标准：满分25分。
-3. 输出格式：必须是严格的 JSON 格式，不要包含 markdown 标记（如 ```json）。
+# ================= 2. 页面设置 =================
+st.set_page_config(page_title="高中英语作文 AI 精批", layout="wide", page_icon="📝")
 
-JSON 结构示例：
-{
-  "score": {
-    "total": 22,
-    "grammar": 8,
-    "vocabulary": 7,
-    "logic": 7,
-    "structure": 6
-  },
-  "comment": "你的文章结构清晰，但在时态使用上有一些错误...",
-  "suggestions": [
-    {
-      "original": "bad sentence",
-      "improved": "good sentence",
-      "reason": "explanation here"
-    }
-  ]
-}
-"""
+# 标题与侧边栏（可以在侧边栏加点说明，显得更专业）
+st.title("📝 高中英语作文 AI 精批系统")
+st.markdown("---")
 
-# ================= 页面布局 =================
-st.set_page_config(page_title="高中英语作文 AI 精批 (DeepSeek版)", layout="wide")
+with st.sidebar:
+    st.header("关于系统")
+    st.info("采用 DeepSeek-V3 引擎，专为高中英语作文评分标准定制。")
+    st.warning("⚠️ 提示：请确保作文为纯英文，字数建议在 80-200 词之间。")
 
-st.title("📝 高中英语作文 AI 提分神器")
-st.caption("Powered by DeepSeek-V3 (国产之光 🚀)")
-
+# ================= 3. 主界面布局 =================
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("✍️ 输入作文")
-    st.info("提示：DeepSeek 暂不支持直接读图，请使用手机提取文字后粘贴到下方。")
-    
-    # 这里只保留文本输入框
-    user_text = st.text_area("在此粘贴你的英语作文...", height=400, placeholder="例如：Running is good for health...")
-    
-    start_btn = st.button("开始 AI 批改", type="primary")
+    st.subheader("✍️ 提交作文")
+    user_text = st.text_area("在此粘贴你的作文内容...", height=450, placeholder="Once upon a time...")
+    start_btn = st.button("🚀 开始 AI 老师批改", type="primary", use_container_width=True)
 
-# ================= 处理逻辑 =================
+# ================= 4. 核心逻辑 =================
 if start_btn:
     if not user_text:
-        st.warning("请先输入作文内容！")
+        st.warning("请输入作文内容后再提交。")
     else:
         with col2:
-            with st.spinner("DeepSeek 老师正在极速阅卷中..."):
+            with st.spinner("AI 老师正在认真阅卷并查阅词典..."):
                 try:
-                    # 1. 调用 DeepSeek API
+                    # 调用 DeepSeek API
                     response = client.chat.completions.create(
-                        model="deepseek-chat",  # DeepSeek V3 模型名称
+                        model="deepseek-chat",
                         messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "system", "content": "你是一位高中英语老师。分析作文并返回严格的JSON格式，包含score(total, grammar, vocabulary, logic, structure), comment, suggestions(original, improved, reason)。"},
                             {"role": "user", "content": user_text}
                         ],
-                        #这一步是为了防止DeepSeek有时候不返回JSON
-                        response_format={ "type": "json_object" }, 
-                        temperature=1.3 # DeepSeek 建议稍微高一点的温度以获得更好效果
+                        response_format={ "type": "json_object" }
                     )
                     
-                    # 2. 获取返回的文本
-                    content = response.choices[0].message.content
+                    # 解析结果
+                    result = json.loads(response.choices[0].message.content)
                     
-                    # 3. 解析 JSON
-                    result = json.loads(content)
-                    
-                    # 4. 展示结果
-                    st.success("批改完成！")
-                    
-                    # --- 展示分数 ---
+                    # --- A. 展示分数卡片 ---
+                    st.success("✅ 批改完成！")
                     s = result.get('score', {})
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("🏆 总分", f"{s.get('total', 0)}/25")
-                    c2.metric("语法", s.get('grammar', 0))
-                    c3.metric("词汇", s.get('vocabulary', 0))
-                    c4.metric("逻辑", s.get('logic', 0))
-                    
-                    # --- 雷达图 ---
-                    try:
-                        scores = [s.get('grammar',0), s.get('vocabulary',0), s.get('logic',0), s.get('structure',0), s.get('grammar',0)]
-                        df = pd.DataFrame(dict(r=scores, theta=['语法','词汇','逻辑','结构','语法']))
-                        fig = px.line_polar(df, r='r', theta='theta', line_close=True)
-                        st.plotly_chart(fig, use_container_width=True)
-                    except:
-                        pass 
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("🏆 预估总分", f"{s.get('total', 0)}/25")
+                    c2.metric("📝 语法分", s.get('grammar', 0))
+                    c3.metric("📖 词汇分", s.get('vocabulary', 0))
 
-                    # --- 点评 ---
-                    st.info(f"💡 **名师点评：** {result.get('comment', '无点评')}")
-                    
-                    # --- 建议 ---
-                    st.subheader("✨ 提分建议")
+                    # --- B. 雷达图分析 ---
+                    st.subheader("📊 维度分析")
+                    try:
+                        # 准备雷达图数据
+                        categories = ['语法', '词汇', '逻辑', '结构']
+                        scores = [
+                            s.get('grammar', 0), 
+                            s.get('vocabulary', 0), 
+                            s.get('logic', 0), 
+                            s.get('structure', 0)
+                        ]
+                        # 为了闭合图形，需要重复第一个点
+                        df = pd.DataFrame(dict(r=scores + [scores[0]], theta=categories + [categories[0]]))
+                        fig = px.line_polar(df, r='r', theta='theta', line_close=True)
+                        fig.update_traces(fill='toself') # 填充颜色，更美观
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as radar_err:
+                        st.error(f"图表生成失败: {radar_err}")
+
+                    # --- C. 名师点评 ---
+                    st.subheader("👨‍🏫 名师点评")
+                    st.info(result.get('comment', '暂无总体点评'))
+
+                    # --- D. 提分建议 ---
+                    st.subheader("✨ 逐句精修")
                     for item in result.get('suggestions', []):
-                        with st.expander(f"❌ {item.get('original', '原文')}"):
-                            st.markdown(f"**✅ 建议:** `{item.get('improved', '')}`")
-                            st.caption(f"原因: {item.get('reason', '')}")
+                        with st.expander(f"❌ 原文: {item.get('original')}"):
+                            st.success(f"✅ 建议: {item.get('improved')}")
+                            st.caption(f"💡 提分点: {item.get('reason')}")
 
                 except Exception as e:
-                    st.error(f"发生错误: {e}")
-                    # 如果解析JSON失败，打印原始内容方便调试
-                    # st.text(content)
+                    st.error(f"批改过程中出错: {e}")
+                    st.write("原始响应内容：", response.choices[0].message.content if 'response' in locals() else "无")
