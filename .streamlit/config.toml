@@ -1,0 +1,27 @@
+[browser]
+# 关闭 Streamlit 官方的统计数据收集，防止国内网络环境下的报错
+gatherUsageStats = false
+
+[theme]
+# 设置网站的主色调（建议使用代表智慧和教育的蓝色）
+primaryColor = "#4A90E2"
+
+# 页面背景颜色
+backgroundColor = "#FFFFFF"
+
+# 侧边栏/卡片背景颜色
+secondaryBackgroundColor = "#F0F2F6"
+
+# 文字颜色
+textColor = "#262730"
+
+# 字体（设置为无衬线字体，看起来更现代）
+font = "sans serif"
+
+[client]
+# 设置工具栏（右上角菜单）的显示方式
+toolbarMode = "minimal"
+
+[ui]
+# 默认让侧边栏处于展开状态（方便用户看到激活码输入框）
+sidebarNavDefaultState = "expanded"

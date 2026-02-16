@@ -1,0 +1,13 @@
+# 忽略 Streamlit 的本地密钥文件
+.streamlit/secrets.toml
+
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+
+# 忽略操作系统临时文件
+.DS_Store
+Thumbs.db
+
+# 如果你用了 .env 文件，也忽略它
+.env
