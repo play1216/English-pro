@@ -1,6 +1,9 @@
 import streamlit as st
 import numpy as np
-import cv2
+try:
+    import cv2
+except Exception:
+    cv2 = None
 import logging
 import os
 import json
@@ -138,9 +141,16 @@ class GoogleVisionOCREngine(BaseOCREngine):
         """提取文字"""
         start_time = time.time()
         try:
-            # 转换图像为base64
-            _, buffer = cv2.imencode('.jpg', image)
-            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            # 转换图像为base64（兼容无CV环境）
+            if cv2 is not None:
+                _, buffer = cv2.imencode('.jpg', image)
+                image_bytes = buffer.tobytes()
+            else:
+                img = Image.fromarray(image[..., ::-1]) if image.ndim == 3 else Image.fromarray(image)
+                buf = io.BytesIO()
+                img.convert('RGB').save(buf, format='JPEG', quality=85)
+                image_bytes = buf.getvalue()
+            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
             
             # 构建请求
             request_data = {
@@ -220,9 +230,15 @@ class AzureOCREngine(BaseOCREngine):
         """提取文字"""
         start_time = time.time()
         try:
-            # 转换图像为base64
-            _, buffer = cv2.imencode('.jpg', image)
-            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            # 转换图像为字节流（兼容无CV环境）
+            if cv2 is not None:
+                _, buffer = cv2.imencode('.jpg', image)
+                image_bytes = buffer.tobytes()
+            else:
+                img = Image.fromarray(image[..., ::-1]) if image.ndim == 3 else Image.fromarray(image)
+                buf = io.BytesIO()
+                img.convert('RGB').save(buf, format='JPEG', quality=85)
+                image_bytes = buf.getvalue()
             
             # 构建请求
             headers = {
@@ -237,7 +253,7 @@ class AzureOCREngine(BaseOCREngine):
             
             response = requests.post(
                 self.endpoint,
-                data=buffer,
+                data=image_bytes,
                 headers=headers,
                 params=params,
                 timeout=30

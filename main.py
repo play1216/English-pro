@@ -111,9 +111,11 @@ with col1:
                 with st.spinner("🤖 正在进行OCR识别..."):
                     # 转换图像
                     import numpy as np
-                    import cv2
-                    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
-                    image = cv2.imdecode(file_bytes, 1)
+                    from PIL import Image
+                    import io
+                    file_bytes = uploaded_img.read()
+                    image = Image.open(io.BytesIO(file_bytes)).convert('RGB')
+                    image = np.array(image)
                     
                     if image is None:
                         st.error("❌ 无法解析图片，请确认文件完整。")
