@@ -2,3 +2,8 @@ streamlit
 openai
 pandas
 plotly
+paddlepaddle
+paddleocr
+opencv-python-headless
+numpy
+Pillow

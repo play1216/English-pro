@@ -1,107 +1,192 @@
 import streamlit as st
-from openai import OpenAI
-import json
 import pandas as pd
 import plotly.express as px
+from modules.grading import EssayGrader  # 导入我们刚写的类
+from modules.multi_ocr_engine import PaddleOCREngine
+from modules.subscription import SubscriptionManager
 
-# ================= 1. 安全配置 (兼容云端与本地) =================
-# 优先读取 Secrets，如果读不到则提示
-if "DEEPSEEK_API_KEY" not in st.secrets:
-    st.error("❌ 未找到 API Key。请在本地 .streamlit/secrets.toml 或 Streamlit Cloud 后台配置。")
-    st.stop()
+# ================= 1. 初始化引擎 =================
+st.set_page_config(page_title="DeepSeek 英语精批 Pro", layout="wide", page_icon="📝")
+grader = EssayGrader()
+subscription = SubscriptionManager()
 
-# 统一读取 Key
-MY_KEY = str(st.secrets["DEEPSEEK_API_KEY"]).strip()
+# OCR配置参数（在侧边栏设置后初始化）
+ocr_lang = 'en'  # 默认英语
+ocr_use_gpu = False  # 默认CPU
+ocr_enable_mkldnn = False  # 默认禁用MKLDNN
+ocr_preprocess = True  # 默认值
 
-# 初始化客户端
-try:
-    client = OpenAI(
-        api_key=MY_KEY,
-        base_url="https://api.deepseek.com"
-    )
-except Exception as e:
-    st.error(f"❌ 客户端初始化失败: {e}")
-    st.stop()
-
-# ================= 2. 页面设置 =================
-st.set_page_config(page_title="高中英语作文 AI 精批", layout="wide", page_icon="📝")
-
-# 标题与侧边栏（可以在侧边栏加点说明，显得更专业）
-st.title("📝 高中英语作文 AI 精批系统")
-st.markdown("---")
-
+# ================= 2. 侧边栏配置 =================
 with st.sidebar:
-    st.header("关于系统")
-    st.info("采用 DeepSeek-V3 引擎，专为高中英语作文评分标准定制。")
-    st.warning("⚠️ 提示：请确保作文为纯英文，字数建议在 80-200 词之间。")
+    st.title("⚙️ 设置面板")
+    st.markdown("---")
+    
+    # 模式选择
+    mode = st.radio("输入方式", ["✍️ 文本输入", "📸 拍照上传(OCR)"])
+    
+    st.markdown("---")
+    essay_type = st.radio(
+        "作文类型",
+        ("applied", "continuation"),
+        format_func=lambda x: "应用文 (15分)" if x == "applied" else "读后续写 (25分)"
+    )
+    st.info("💡 提示：OCR 首次运行需要加载模型，请耐心等待 10-20 秒。")
+    
+    # OCR 配置选项
+    if mode == "📸 拍照上传(OCR)":
+        st.markdown("---")
+        st.subheader("🔧 OCR 设置")
+        
+        # 语言选择
+        ocr_lang = st.selectbox(
+            "识别语言",
+            ['en', 'ch'],
+            format_func=lambda x: "英语" if x == 'en' else "中文"
+        )
+        
+        # 性能选项
+        col_a, col_b = st.columns(2)
+        with col_a:
+            ocr_use_gpu = st.checkbox("使用 GPU", value=False, help="需要 CUDA 支持")
+        with col_b:
+            ocr_enable_mkldnn = st.checkbox("启用 MKLDNN", value=False, help="CPU 加速优化")
+        
+        # 预处理选项
+        ocr_preprocess = st.checkbox("图像预处理", value=True, help="提高识别准确率")
+        
+        # 智能校正选项
+        ocr_smart_correction = st.checkbox(
+            "智能单词校正", 
+            value=True, 
+            help="自动校正拼写错误，识别被划线的单词，排除横线干扰"
+        )
 
-# ================= 3. 主界面布局 =================
+    st.markdown("---")
+    st.subheader("💳 会员与用量")
+    col_p, col_l = st.columns(2)
+    with col_p:
+        st.metric("价格", f"¥{subscription.get_price()}/月")
+    with col_l:
+        st.metric("月上限", f"{subscription.get_limit()}条")
+    used = subscription.current_usage()
+    remaining = subscription.remaining()
+    df_usage = pd.DataFrame({"类型": ["已使用", "剩余"], "数量": [used, remaining]})
+    fig_usage = px.bar(df_usage, x="类型", y="数量", text="数量", color="类型", height=250)
+    fig_usage.update_traces(textposition="outside")
+    fig_usage.update_layout(showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig_usage, use_container_width=True)
+    if subscription.is_subscribed():
+        st.success("已开通会员")
+    else:
+        if st.button(f"开通会员（¥{subscription.get_price()}/月）", use_container_width=True):
+            subscription.subscribe()
+            st.success("开通成功")
+            st.rerun()
+
+# 初始化OCR引擎（在侧边栏配置之后）
+ocr_engine = PaddleOCREngine(lang=ocr_lang, use_gpu=ocr_use_gpu, enable_mkldnn=ocr_enable_mkldnn)
+
+# ================= 3. 主界面 =================
+st.title("📝 高中英语作文 AI 精批系统")
+st.markdown("#### *Powered by DeepSeek-V3 & PaddleOCR*")
+
 col1, col2 = st.columns([1, 1])
 
+# --- 左侧：输入区 ---
 with col1:
-    st.subheader("✍️ 提交作文")
-    user_text = st.text_area("在此粘贴你的作文内容...", height=450, placeholder="Once upon a time...")
-    start_btn = st.button("🚀 开始 AI 老师批改", type="primary", use_container_width=True)
+    st.subheader("1. 作文提交")
+    
+    final_input_text = ""
 
-# ================= 4. 核心逻辑 =================
-if start_btn:
-    if not user_text:
-        st.warning("请输入作文内容后再提交。")
-    else:
-        with col2:
-            with st.spinner("AI 老师正在认真阅卷并查阅词典..."):
-                try:
-                    # 调用 DeepSeek API
-                    response = client.chat.completions.create(
-                        model="deepseek-chat",
-                        messages=[
-                            {"role": "system", "content": "你是一位高中英语老师。分析作文并返回严格的JSON格式，包含score(total, grammar, vocabulary, logic, structure), comment, suggestions(original, improved, reason)。"},
-                            {"role": "user", "content": user_text}
-                        ],
-                        response_format={ "type": "json_object" }
-                    )
+    # A. 拍照模式
+    if mode == "📸 拍照上传(OCR)":
+        uploaded_img = st.file_uploader("上传作文图片", type=['jpg', 'png', 'jpeg'])
+        
+        if uploaded_img:
+            # 展示缩略图
+            st.image(uploaded_img, caption="已上传图片", use_container_width=True)
+            
+            # 识别按钮
+            if st.button("🔍 开始识别", type="primary"):
+                with st.spinner("🤖 正在进行OCR识别..."):
+                    # 转换图像
+                    import numpy as np
+                    import cv2
+                    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
+                    image = cv2.imdecode(file_bytes, 1)
                     
-                    # 解析结果
-                    result = json.loads(response.choices[0].message.content)
+                    if image is None:
+                        st.error("❌ 无法解析图片，请确认文件完整。")
+                    else:
+                        # 使用PaddleOCR提取文字
+                        result = ocr_engine.extract_text(image)
+                        if result.text.strip():
+                            extracted = result.text
+                            st.success("✅ 识别完成！")
+                            # 将识别结果放入 session_state
+                            st.session_state['ocr_result'] = extracted
+                            st.rerun()
+                        else:
+                            st.error("❌ 未能识别到有效文字，请尝试重新拍照或调整图片角度。")
                     
-                    # --- A. 展示分数卡片 ---
-                    st.success("✅ 批改完成！")
-                    s = result.get('score', {})
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("🏆 预估总分", f"{s.get('total', 0)}/25")
-                    c2.metric("📝 语法分", s.get('grammar', 0))
-                    c3.metric("📖 词汇分", s.get('vocabulary', 0))
+                    uploaded_img.seek(0)
+    
+    # B. 文本展示/编辑区 (无论是OCR还是手输，都在这里汇总)
+    # 使用 session_state 保持 OCR 的结果
+    default_text = st.session_state.get('ocr_result', "")
+    
+    user_text = st.text_area(
+        "📝 作文内容 (已智能校对，下划线标注需检查的单词)", 
+        value=default_text,
+        height=400,
+        placeholder="在此直接输入或等待智能OCR识别结果..."
+    )
+    
+    submit_btn = st.button("🚀 开始 AI 老师批改", type="primary", use_container_width=True)
 
-                    # --- B. 雷达图分析 ---
-                    st.subheader("📊 维度分析")
-                    try:
-                        # 准备雷达图数据
-                        categories = ['语法', '词汇', '逻辑', '结构']
-                        scores = [
-                            s.get('grammar', 0), 
-                            s.get('vocabulary', 0), 
-                            s.get('logic', 0), 
-                            s.get('structure', 0)
-                        ]
-                        # 为了闭合图形，需要重复第一个点
-                        df = pd.DataFrame(dict(r=scores + [scores[0]], theta=categories + [categories[0]]))
-                        fig = px.line_polar(df, r='r', theta='theta', line_close=True)
-                        fig.update_traces(fill='toself') # 填充颜色，更美观
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception as radar_err:
-                        st.error(f"图表生成失败: {radar_err}")
-
-                    # --- C. 名师点评 ---
-                    st.subheader("👨‍🏫 名师点评")
-                    st.info(result.get('comment', '暂无总体点评'))
-
-                    # --- D. 提分建议 ---
-                    st.subheader("✨ 逐句精修")
-                    for item in result.get('suggestions', []):
-                        with st.expander(f"❌ 原文: {item.get('original')}"):
-                            st.success(f"✅ 建议: {item.get('improved')}")
-                            st.caption(f"💡 提分点: {item.get('reason')}")
-
-                except Exception as e:
-                    st.error(f"批改过程中出错: {e}")
-                    st.write("原始响应内容：", response.choices[0].message.content if 'response' in locals() else "无")
+# --- 右侧：结果区 ---
+with col2:
+    st.subheader("2. 批改报告")
+    
+    if submit_btn:
+        if len(user_text) < 10:
+            st.warning("⚠️ 内容太短，无法批改。")
+        else:
+            if not subscription.is_subscribed():
+                st.error(f"需要开通会员（¥{subscription.get_price()}/月，月上限{subscription.get_limit()}条）")
+            elif subscription.remaining() <= 0:
+                st.error("已达到本月500条使用上限")
+            else:
+                with st.spinner("👩‍🏫 阅卷组长正在评分..."):
+                    result = grader.grade(user_text, essay_type)
+                    
+                    if "error" in result:
+                        st.error(result['error'])
+                    else:
+                        subscription.increment(1)
+                        s = result.get('score', {})
+                        total = s.get('total', 0)
+                        rank = s.get('rank', '未定档')
+                        max_score = 15 if essay_type == 'applied' else 25
+                        color = "#28a745" if (total/max_score) > 0.8 else "#ffc107"
+                        st.markdown(f"""
+                            <div style="padding:15px; border-radius:10px; background:#f0f2f6; text-align:center;">
+                                <h3 style="margin:0; color:#555;">{rank}</h3>
+                                <h1 style="font-size:4rem; margin:0; color:{color};">{total} <span style="font-size:1.5rem; color:#999;">/ {max_score}</span></h1>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        radar = s.get('radar', {})
+                        if radar:
+                            df = pd.DataFrame(dict(
+                                r=list(radar.values()),
+                                theta=['语法', '词汇', '逻辑', '结构']
+                            ))
+                            fig = px.line_polar(df, r='r', theta='theta', line_close=True)
+                            fig.update_traces(fill='toself')
+                            st.plotly_chart(fig, use_container_width=True)
+                        st.info(f"📌 **总评**：{result.get('comment')}")
+                        st.markdown("### ✍️ 句型升级")
+                        for advice in result.get('suggestions', []):
+                            with st.expander(f"❌ {advice['original'][:30]}..."):
+                                st.write(f"**✅ 改写**：{advice['improved']}")
+                                st.caption(f"💡 原因：{advice['reason']}")

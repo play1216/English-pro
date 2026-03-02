@@ -11,3 +11,7 @@ Thumbs.db
 
 # 如果你用了 .env 文件，也忽略它
 .env
+
+# 忽略本地运行产生的数据文件（不适合提交到云端）
+grading_usage.json
+ocr_usage.json

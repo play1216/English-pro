@@ -1,0 +1,28 @@
+{
+  "apis": {
+    "google_vision": {
+      "name": "Google Vision",
+      "api_key": "",
+      "endpoint": "",
+      "cost_per_request": 0.0015,
+      "enabled": false,
+      "description": "Google Cloud Vision API，高精度OCR，$1.5/1000次"
+    },
+    "azure_ocr": {
+      "name": "Azure Computer Vision",
+      "api_key": "",
+      "endpoint": "https://<region>.api.cognitive.microsoft.com/vision/v3.2/ocr",
+      "cost_per_request": 0.001,
+      "enabled": false,
+      "description": "Azure Computer Vision，稳定可靠，$1/1000次"
+    },
+    "baidu_ocr": {
+      "name": "百度OCR",
+      "api_key": "",
+      "endpoint": "https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic",
+      "cost_per_request": 0.0001,
+      "enabled": false,
+      "description": "百度智能云OCR，中文优化，¥0.5/1000次"
+    }
+  }
+}
