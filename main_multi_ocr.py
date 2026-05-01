@@ -1,16 +1,31 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import numpy as np
-import cv2
+from modules.afdian import AfdianClient
+from modules.auth import AuthManager, render_auth_gate
 from modules.grading import EssayGrader
-from modules.multi_ocr_engine import MultiOCREngine, GoogleVisionOCREngine, AzureOCREngine
+from modules.image_utils import load_image_bgr
+from modules.membership import render_membership_panel
+from modules.multi_ocr_engine import MultiOCREngine, GoogleVisionOCREngine, AzureOCREngine, ScnetOCREngine
 from modules.ocr_config import OCRConfigManager
 from modules.simple_logic_validator import SimpleLogicValidator
+from modules.subscription import SubscriptionManager
+from modules.ui import apply_app_theme, render_app_header, render_panel_title, render_score_card
 
 # ================= 1. 初始化引擎 =================
 st.set_page_config(page_title="DeepSeek 英语精批 Pro", layout="wide", page_icon="📝")
+apply_app_theme()
+auth_manager = AuthManager()
+if not auth_manager.is_logged_in():
+    render_auth_gate(auth_manager)
+
+current_user = auth_manager.get_current_user()
 grader = EssayGrader()
+membership_days = int(st.secrets.get("MEMBERSHIP_DAYS", 31))
+subscription = SubscriptionManager(user_id=current_user, membership_days=membership_days)
+afdian_client = AfdianClient()
+st.session_state.setdefault("essay_prompt_text", "")
+st.session_state.setdefault("essay_body_text", st.session_state.get("ocr_result", ""))
 
 # 初始化OCR配置管理器
 config_manager = OCRConfigManager()
@@ -25,10 +40,19 @@ for api_name, api_config in enabled_apis.items():
         multi_ocr_engine.add_api_engine(GoogleVisionOCREngine(api_config.api_key))
     elif api_name == 'azure_ocr':
         multi_ocr_engine.add_api_engine(AzureOCREngine(api_config.api_key, api_config.endpoint))
+    elif api_name == 'scnet_ocr':
+        multi_ocr_engine.add_api_engine(ScnetOCREngine(api_config.api_key, api_config.endpoint))
 
 # ================= 2. 侧边栏配置 =================
 with st.sidebar:
     st.title("⚙️ 设置面板")
+    st.markdown("---")
+    st.subheader("👤 当前用户")
+    st.write(current_user)
+    if st.button("退出登录", use_container_width=True):
+        auth_manager.logout()
+        st.rerun()
+    
     st.markdown("---")
     
     # 模式选择
@@ -92,21 +116,68 @@ with st.sidebar:
             st.error("⚠️ 已达到预算限制，API调用将被暂停")
         else:
             st.success(f"✅ 预算充足：日剩余 ${budget_status['daily_remaining']:.4f}")
+    
+    st.markdown("---")
+    render_membership_panel(subscription, afdian_client, panel_key="multi")
 
 # ================= 3. 主界面 =================
-st.title("📝 高中英语作文 AI 精批系统 (多OCR版)")
-st.markdown("#### *Powered by DeepSeek-V3 & Multi-OCR Engine*")
+essay_type_label = "应用文 (15分)" if essay_type == "applied" else "读后续写 (25分)"
+render_app_header(
+    "高中英语作文 AI 精批系统",
+    "多引擎 OCR、题目定向批改和按用户计费的精批工作台。",
+    current_user,
+    essay_type_label,
+)
 
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([1.02, 0.98], gap="large")
 
 # --- 左侧：输入区 ---
 with col1:
-    st.subheader("1. 作文提交")
-    
-    final_input_text = ""
+    render_panel_title("1. 作文提交", "支持先识别题目材料，再识别正文，最后统一批改。")
+    task_input_label = "作文题目 / 写作任务"
+    task_input_placeholder = "例如：假设你是李华，请写一封建议信，说明问题并给出两条建议。"
+    prompt_upload_label = "上传作文题目图片"
+    if essay_type == "continuation":
+        task_input_label = "原文材料 / 段首句 / 续写要求"
+        task_input_placeholder = "请粘贴读后续写原文、段首句和关键信息，系统会结合材料判断情节衔接与续写方向。"
+        prompt_upload_label = "上传原文材料图片"
+
+    with st.expander("📷 拍照导入题目 / 材料", expanded=False):
+        uploaded_prompt_img = st.file_uploader(
+            prompt_upload_label,
+            type=["jpg", "png", "jpeg"],
+            key="essay_prompt_uploader_multi",
+        )
+        if uploaded_prompt_img:
+            st.image(uploaded_prompt_img, caption="待识别题目图片", use_container_width=True)
+            if st.button("识别题目图片", key="recognize_prompt_multi", use_container_width=True):
+                with st.spinner("🔎 正在识别作文题目..."):
+                    prompt_image = load_image_bgr(uploaded_prompt_img)
+                    prompt_result = multi_ocr_engine.extract_text_with_voting(
+                        prompt_image,
+                        max_engines=2,
+                        budget_limit=0.01,
+                    )
+                    if prompt_result["text"].strip():
+                        extracted_prompt = prompt_result["text"].strip()
+                        st.session_state["essay_prompt_result"] = extracted_prompt
+                        st.session_state["essay_prompt_text"] = extracted_prompt
+                        st.success("题目识别完成，已回填到输入框。")
+                        st.rerun()
+                    else:
+                        st.error("未识别到有效题目信息，请尝试更清晰的图片。")
+
+    render_panel_title(task_input_label, "支持手动输入，也支持拍照导入。")
+    essay_prompt = st.text_area(
+        task_input_label,
+        height=180,
+        placeholder=task_input_placeholder,
+        key="essay_prompt_text",
+    )
 
     # A. 拍照模式
     if mode == "📸 拍照上传(多OCR)":
+        render_panel_title("作文正文图片导入", "可组合多种 OCR 引擎，提升识别稳定性。")
         uploaded_img = st.file_uploader("上传作文图片", type=['jpg', 'png', 'jpeg'])
         
         if uploaded_img:
@@ -142,9 +213,8 @@ with col1:
             if st.button("🔍 开始多引擎识别", type="primary"):
                 with st.spinner("🤖 正在进行多引擎OCR识别..."):
                     try:
-                        # 转换图像
-                        file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
-                        image = cv2.imdecode(file_bytes, 1)
+                        logic_validator = SimpleLogicValidator()
+                        image = load_image_bgr(uploaded_img)
                         
                         if image is None:
                             st.error("❌ 无法解析图片，请确认文件完整。")
@@ -170,7 +240,6 @@ with col1:
                             if result['text'].strip():
                                 # 逻辑校验
                                 if enable_logic_check:
-                                    logic_validator = SimpleLogicValidator()
                                     validation = logic_validator.validate_essay_logic(result['text'])
                                     
                                     if not validation['is_logical']:
@@ -207,6 +276,7 @@ with col1:
                                 
                                 # 将识别结果放入 session_state
                                 st.session_state['ocr_result'] = final_text
+                                st.session_state["essay_body_text"] = final_text
                                 st.session_state['ocr_details'] = result
                                 st.rerun()
                             else:
@@ -218,13 +288,12 @@ with col1:
                         uploaded_img.seek(0)
     
     # B. 文本展示/编辑区
-    default_text = st.session_state.get('ocr_result', "")
-    
+    render_panel_title("学生作文正文", "识别结果会自动回填，你也可以继续人工润色。")
     user_text = st.text_area(
         "📝 作文内容 (多引擎智能识别)", 
-        value=default_text,
         height=400,
-        placeholder="在此直接输入或等待多OCR识别结果..."
+        placeholder="在此直接输入或等待多OCR识别结果...",
+        key="essay_body_text",
     )
     
     # 显示识别详情（如果有）
@@ -245,52 +314,58 @@ with col1:
 
 # --- 右侧：结果区 ---
 with col2:
-    st.subheader("2. 批改报告")
+    render_panel_title("2. 批改报告", "系统会结合题目、正文和衔接质量生成更细的评价。")
     
     if submit_btn:
         if len(user_text) < 10:
             st.warning("⚠️ 内容太短，无法批改。")
         else:
-            with st.spinner("👩‍🏫 阅卷组长正在评分..."):
-                result = grader.grade(user_text, essay_type)
-                
-                if "error" in result:
-                    st.error(result['error'])
+            if not subscription.can_grade():
+                if subscription.is_subscribed():
+                    st.error(f"已达到本月 {subscription.get_limit()} 篇会员上限")
                 else:
-                    # 解析结果
-                    s = result.get('score', {})
-                    total = s.get('total', 0)
-                    rank = s.get('rank', '未定档')
-                    max_score = 15 if essay_type == 'applied' else 25
+                    st.error("本账号 3 次免费额度已用完，请先完成爱发电付费开通。")
+            else:
+                with st.spinner("👩‍🏫 阅卷组长正在评分..."):
+                    result = grader.grade(user_text, essay_type, essay_prompt=essay_prompt)
                     
-                    # 1. 顶部大分
-                    color = "#28a745" if (total/max_score) > 0.8 else "#ffc107"
-                    st.markdown(f"""
-                        <div style="padding:15px; border-radius:10px; background:#f0f2f6; text-align:center;">
-                            <h3 style="margin:0; color:#555;">{rank}</h3>
-                            <h1 style="font-size:4rem; margin:0; color:{color};">{total} <span style="font-size:1.5rem; color:#999;">/ {max_score}</span></h1>
-                        </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # 2. 维度雷达图
-                    radar = s.get('radar', {})
-                    if radar:
-                        df = pd.DataFrame(dict(
-                            r=list(radar.values()),
-                            theta=['语法', '词汇', '逻辑', '结构']
-                        ))
-                        fig = px.line_polar(df, r='r', theta='theta', line_close=True)
-                        fig.update_traces(fill='toself')
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    # 3. 点评与建议
-                    st.info(f"📌 **总评**：{result.get('comment')}")
-                    
-                    st.markdown("### ✍️ 句型升级")
-                    for advice in result.get('suggestions', []):
-                        with st.expander(f"❌ {advice['original'][:30]}..."):
-                            st.write(f"**✅ 改写**：{advice['improved']}")
-                            st.caption(f"💡 原因：{advice['reason']}")
+                    if "error" in result:
+                        st.error(result['error'])
+                    else:
+                        subscription.increment(1)
+                        s = result.get('score', {})
+                        total = s.get('total', 0)
+                        rank = s.get('rank', '未定档')
+                        max_score = 15 if essay_type == 'applied' else 25
+                        render_score_card(rank, total, max_score)
+                        
+                        radar = s.get('radar', {})
+                        if radar:
+                            df = pd.DataFrame(dict(
+                                r=list(radar.values()),
+                                theta=['语法', '词汇', '逻辑', '结构']
+                            ))
+                            fig = px.line_polar(df, r='r', theta='theta', line_close=True)
+                            fig.update_traces(fill='toself')
+                            st.plotly_chart(fig, use_container_width=True)
+                        task_focus = result.get("task_focus", {})
+                        if task_focus:
+                            st.markdown("### 🎯 题目贴合度")
+                            st.write(task_focus.get("summary", ""))
+                            st.write(task_focus.get("task_completion", ""))
+                            missed_points = [point for point in task_focus.get("missed_points", []) if point]
+                            if missed_points:
+                                st.warning("待补强要点：" + "；".join(missed_points))
+                        
+                        st.info(f"📌 **总评**：{result.get('comment')}")
+                        if not subscription.is_subscribed():
+                            st.caption(f"本账号剩余免费批改次数：{subscription.free_remaining()} / {subscription.get_free_limit()}")
+                        
+                        st.markdown("### ✍️ 句型升级")
+                        for advice in result.get('suggestions', []):
+                            with st.expander(f"❌ {advice['original'][:30]}..."):
+                                st.write(f"**✅ 改写**：{advice['improved']}")
+                                st.caption(f"💡 原因：{advice['reason']}")
 
 # ================= 4. OCR配置页面 =================
 def show_ocr_config_page():

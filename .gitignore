@@ -15,3 +15,6 @@ Thumbs.db
 # 忽略本地运行产生的数据文件（不适合提交到云端）
 grading_usage.json
 ocr_usage.json
+users.json
+.streamlit/ocr_config.local.json
+ocr_config.json

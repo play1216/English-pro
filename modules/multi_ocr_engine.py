@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 try:
-    import cv2
+    import cv2  # optional, may be unavailable on Streamlit Cloud
 except Exception:
     cv2 = None
 import logging
@@ -141,9 +141,10 @@ class GoogleVisionOCREngine(BaseOCREngine):
         """提取文字"""
         start_time = time.time()
         try:
-            # 转换图像为base64（兼容无CV环境）
+            # 转换图像为base64（兼容无CV环境，OpenCV可选）
             if cv2 is not None:
-                _, buffer = cv2.imencode('.jpg', image)
+                img_for_cv = image if image.dtype == np.uint8 else image.astype(np.uint8)
+                _, buffer = cv2.imencode('.jpg', img_for_cv)
                 image_bytes = buffer.tobytes()
             else:
                 img = Image.fromarray(image[..., ::-1]) if image.ndim == 3 else Image.fromarray(image)
@@ -230,9 +231,10 @@ class AzureOCREngine(BaseOCREngine):
         """提取文字"""
         start_time = time.time()
         try:
-            # 转换图像为字节流（兼容无CV环境）
+            # 转换图像为字节流（兼容无CV环境，OpenCV可选）
             if cv2 is not None:
-                _, buffer = cv2.imencode('.jpg', image)
+                img_for_cv = image if image.dtype == np.uint8 else image.astype(np.uint8)
+                _, buffer = cv2.imencode('.jpg', img_for_cv)
                 image_bytes = buffer.tobytes()
             else:
                 img = Image.fromarray(image[..., ::-1]) if image.ndim == 3 else Image.fromarray(image)
@@ -298,6 +300,135 @@ class AzureOCREngine(BaseOCREngine):
     def is_available(self) -> bool:
         """检查API密钥是否设置"""
         return bool(self.api_key and self.endpoint.strip())
+
+class ScnetOCREngine(BaseOCREngine):
+    """Scnet OCR引擎"""
+    
+    def __init__(self, api_key: str, endpoint: str = "https://api.scnet.cn/api/llm/v1/ocr/recognize"):
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.cost_per_request = 0.0  # 根据用户输入，目前视为免费
+    
+    def extract_text(self, image: np.ndarray) -> OCRResult:
+        """提取文字"""
+        start_time = time.time()
+        try:
+            # 转换图像为字节流
+            if cv2 is not None:
+                img_for_cv = image if image.dtype == np.uint8 else image.astype(np.uint8)
+                _, buffer = cv2.imencode('.jpg', img_for_cv)
+                image_bytes = buffer.tobytes()
+            else:
+                img = Image.fromarray(image[..., ::-1]) if image.ndim == 3 else Image.fromarray(image)
+                buf = io.BytesIO()
+                img.convert('RGB').save(buf, format='JPEG', quality=85)
+                image_bytes = buf.getvalue()
+            
+            # 构建请求
+            headers = {
+                'Authorization': f'Bearer {self.api_key}'
+            }
+            
+            files = {
+                'file': ('image.jpg', image_bytes, 'image/jpeg')
+            }
+            
+            data = {
+                'ocrType': 'GENERAL'
+            }
+            
+            response = requests.post(
+                self.endpoint,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=30
+            )
+            
+            processing_time = time.time() - start_time
+            
+            if response.status_code != 200:
+                logging.error(f"Scnet OCR API错误: {response.status_code} - {response.text}")
+                return OCRResult("", 0.0, "Scnet OCR", self.cost_per_request, processing_time)
+            
+            result_json = response.json()
+            
+            # 解析结果 (参考 API 文档)
+            if result_json.get('code') != 200 or 'data' not in result_json:
+                logging.error(f"Scnet OCR 返回错误: {result_json.get('msg', '未知错误')}")
+                return OCRResult("", 0.0, "Scnet OCR", self.cost_per_request, processing_time)
+            
+            # 根据 API 文档，data 是一个列表，里面有 result
+            data_list = result_json.get('data', [])
+            if not isinstance(data_list, list) or not data_list:
+                return OCRResult("", 0.0, "Scnet OCR", self.cost_per_request, processing_time)
+            
+            # 假设我们只处理第一张图片的结果
+            first_data = data_list[0]
+            # 根据文档示例，result 是一个列表
+            result_list = first_data.get('result', [])
+            if not isinstance(result_list, list):
+                # 兼容性检查：如果是 result 之外的其他字段
+                result_list = first_data.get('resultArray', [])
+            
+            lines = []
+            confidences = []
+            
+            for item in result_list:
+                # 检查 elements 字段
+                elements = item.get('elements', {})
+                if isinstance(elements, dict):
+                    # 如果 elements 中包含 text 或 lines
+                    if 'text' in elements:
+                        lines.append(elements['text'])
+                    elif 'lines' in elements:
+                        lines.extend(elements['lines'])
+                    else:
+                        # 尝试提取所有非结构化文本值
+                        for val in elements.values():
+                            if isinstance(val, str):
+                                lines.append(val)
+                
+                # 如果 item 直接包含 text
+                if 'text' in item:
+                    lines.append(item['text'])
+                
+                # 检查置信度
+                if 'confidence' in item:
+                    confidences.append(float(item['confidence']))
+                elif 'score' in item:
+                    confidences.append(float(item['score']))
+            
+            # 如果以上逻辑都没抓到，尝试遍历整个 first_data 查找 text
+            if not lines:
+                def extract_text_recursive(obj):
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k == 'text' and isinstance(v, str):
+                                lines.append(v)
+                            else:
+                                extract_text_recursive(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            extract_text_recursive(item)
+                
+                extract_text_recursive(first_data)
+            
+            full_text = '\n'.join(lines)
+            avg_confidence = np.mean(confidences) if confidences else 0.8
+            
+            return OCRResult(full_text, avg_confidence, "Scnet OCR", self.cost_per_request, processing_time)
+            
+        except Exception as e:
+            logging.error(f"Scnet OCR失败: {e}")
+            return OCRResult("", 0.0, "Scnet OCR", self.cost_per_request, time.time() - start_time)
+    
+    def get_cost_per_request(self) -> float:
+        return self.cost_per_request
+    
+    def is_available(self) -> bool:
+        """检查API密钥是否设置"""
+        return bool(self.api_key and self.api_key.strip())
 
 class MultiOCREngine:
     """多OCR引擎管理器"""

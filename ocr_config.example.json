@@ -23,6 +23,14 @@
       "cost_per_request": 0.0001,
       "enabled": false,
       "description": "百度智能云OCR，中文优化，¥0.5/1000次"
+    },
+    "scnet_ocr": {
+      "name": "Scnet OCR",
+      "api_key": "",
+      "endpoint": "https://api.scnet.cn/api/llm/v1/ocr/recognize",
+      "cost_per_request": 0.0,
+      "enabled": false,
+      "description": "Scnet 通用 OCR 服务，支持 31 种识别能力，免费（根据用户输入）"
     }
   }
 }
